@@ -2884,7 +2884,14 @@ exports.downloadCertificatesZip = async (req, res) => {
       ...(project.teamMembers || []).filter((member) => toId(member?._id || member) !== toId(project.owner?._id || project.owner))
     ].filter(Boolean)
     const milestonesCompleted = await Milestone.countDocuments({ projectId: id, status: 'completed' })
-    const certificates = await generateProjectCertificates({ project, members, milestonesCompleted })
+    const certificates = await generateProjectCertificates({ project, members, milestonesCompleted, persist: true })
+
+    const entries = certificates.map((cert) => ({
+      name: `certificate_${String(cert.userName || 'team_member').replace(/[^a-z0-9-_]+/gi, '_')}.pdf`,
+      data: fs.readFileSync(cert.filePath)
+    }))
+    const zip = createZipBuffer(entries)
+    const safeTitle = String(project.title || 'startup').replace(/[^a-z0-9-_]+/gi, '_').slice(0, 80)
 
     project.validation = project.validation || {}
     project.validation.certificates = [
@@ -2903,14 +2910,7 @@ exports.downloadCertificatesZip = async (req, res) => {
         issuedAt: cert.issuedAt
       }))
     ]
-    await project.save()
-
-    const entries = certificates.map((cert) => ({
-      name: `certificate_${String(cert.userName || 'team_member').replace(/[^a-z0-9-_]+/gi, '_')}.pdf`,
-      data: fs.readFileSync(cert.filePath)
-    }))
-    const zip = createZipBuffer(entries)
-    const safeTitle = String(project.title || 'startup').replace(/[^a-z0-9-_]+/gi, '_').slice(0, 80)
+    project.save().catch((saveError) => console.warn('Certificate project history save failed:', saveError.message))
 
     res.setHeader('Content-Type', 'application/zip')
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}_certificates.zip"`)

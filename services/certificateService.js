@@ -116,6 +116,17 @@ const generateCertificatePdf = async ({
   }
 }
 
+const saveCertificateRecords = async (records = []) => {
+  if (!records.length) return
+  try {
+    await Certificate.insertMany(records, { ordered: false })
+  } catch (error) {
+    // Certificate downloads should not fail only because an audit record already exists.
+    if (error?.code !== 11000) throw error
+    console.warn('Certificate record duplicate skipped:', error.message)
+  }
+}
+
 const generateValidationCertificates = async ({ project, members, milestoneSummary = {}, contributionSummaries = new Map() }) => {
   const issuedAt = new Date()
   const certificates = []
@@ -168,7 +179,7 @@ const generateValidationCertificates = async ({ project, members, milestoneSumma
 
 
   if (certificates.length) {
-    await Certificate.insertMany(
+    await saveCertificateRecords(
       certificates.map((cert) => ({
         certificateId: cert.certificateId,
         project: project._id,
@@ -193,7 +204,7 @@ const generateValidationCertificates = async ({ project, members, milestoneSumma
   return certificates
 }
 
-const generateProjectCertificates = async ({ project, members, milestonesCompleted = 0 }) => {
+const generateProjectCertificates = async ({ project, members, milestonesCompleted = 0, persist = true }) => {
   const issuedAt = new Date()
   const timestamp = issuedAt.toISOString()
   const startupName = project.title
@@ -244,8 +255,8 @@ const generateProjectCertificates = async ({ project, members, milestonesComplet
     certificates.push(certificate)
   }
 
-  if (certificates.length) {
-    await Certificate.insertMany(
+  if (persist && certificates.length) {
+    await saveCertificateRecords(
       certificates.map((cert) => ({
         certificateId: cert.certificateId,
         project: project._id,
