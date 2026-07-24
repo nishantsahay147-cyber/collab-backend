@@ -11,7 +11,7 @@ const ensureDir = (dirPath) => {
 }
 
 const formatDate = (value) => {
-  if (!value) return '—'
+  if (!value) return '-'
   try {
     return new Date(value).toLocaleDateString('en-IN', {
       year: 'numeric',
@@ -19,9 +19,18 @@ const formatDate = (value) => {
       day: 'numeric'
     })
   } catch {
-    return '—'
+    return '-'
   }
 }
+
+const toId = (value) => String(value?._id || value?.id || value || '')
+
+const isProjectOwner = (project, userId) => toId(project?.owner) === toId(userId)
+
+const formatStage = (stage, fallback = 'Startup Execution') =>
+  String(stage || fallback)
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
 
 const buildVerificationUrl = (certificateId) => {
   const appBase = process.env.FRONTEND_URL || process.env.PUBLIC_APP_BASE || 'https://www.joincollab.org'
@@ -39,7 +48,9 @@ const createCertificateHash = ({ memberName, role, startupName, projectId, times
 
 const generateCertificatePdf = async ({
   userName,
+  userEmail,
   projectTitle,
+  projectId,
   collegeName,
   issuedAt,
   certificateId,
@@ -75,33 +86,40 @@ const generateCertificatePdf = async ({
 
     const templatePath = path.join(__dirname, '..', 'assets', 'certificate-template.png')
     if (fs.existsSync(templatePath)) {
-      doc.image(templatePath, 0, 0, { fit: [pageWidth, pageHeight], align: 'center', valign: 'center' })
+      doc.image(templatePath, 0, 0, { width: pageWidth, height: pageHeight })
     } else {
       doc.rect(20, 20, pageWidth - 40, pageHeight - 40).lineWidth(2).stroke('#6C5CE7')
     }
 
-    const certY = pageHeight * 0.40
-    const workY = pageHeight * 0.56
-    const nameSize = 34
-    const nameY = Math.round(((certY + 14) + workY - nameSize) / 2) - 8
+    doc.rect(190, 128, pageWidth - 380, 46).fill('#fafbff')
+    centerText('STARTUP EXECUTION CERTIFICATE', 132, 25, 'Times-Bold', '#111827')
+    centerText('This certificate confirms verified participation in the COLLAB pre-incubation startup process.', 178, 12, 'Times-Roman', '#374151')
+    centerText(userName || 'Team Member', 224, 34, 'Times-Italic', '#111827')
+    centerText(userEmail || 'email unavailable', 263, 11, 'Times-Roman', '#4b5563')
+    centerText(`served as ${memberRole} for`, 292, 13, 'Times-Roman', '#374151')
+    centerText(projectTitle || 'Startup Venture', 322, 22, 'Times-Bold', '#111827')
 
-    centerText('Startup Execution Certificate', pageHeight * 0.30, 24, 'Times-Bold')
-    centerText('This certifies that', certY, 14)
-    centerText(userName, nameY, nameSize, 'Times-Italic')
-    centerText(`served as ${memberRole} for the startup`, workY, 13)
-    centerText(`"${projectTitle}"`, pageHeight * 0.60, 16, 'Times-Italic')
-    centerText(`Status: ${projectStatus} | Stage achieved: ${stageAchieved} | Milestones completed: ${milestonesCompleted}`, pageHeight * 0.64, 12)
-    centerText(contributionSummary, pageHeight * 0.68, 11)
+    const detailY = 372
+    doc.roundedRect(116, detailY, pageWidth - 232, 86, 12).lineWidth(1).strokeColor('#d8d6ff').stroke()
+    doc.font('Times-Bold').fontSize(10).fillColor('#111827')
+    doc.text('PROJECT STATUS', 146, detailY + 18)
+    doc.text('STAGE ACHIEVED', 322, detailY + 18)
+    doc.text('MILESTONES', 516, detailY + 18)
+    doc.text('ISSUED ON', 656, detailY + 18)
+    doc.font('Times-Roman').fontSize(12).fillColor('#374151')
+    doc.text(projectStatus, 146, detailY + 42, { width: 130 })
+    doc.text(stageAchieved, 322, detailY + 42, { width: 150 })
+    doc.text(String(milestonesCompleted), 516, detailY + 42, { width: 90 })
+    doc.text(formatDate(issuedAt), 656, detailY + 42, { width: 115 })
 
-    if (collegeName) {
-      centerText(`College: ${collegeName.toUpperCase()}`, pageHeight * 0.74, 12)
-    }
+    centerText(contributionSummary, 478, 11, 'Times-Roman', '#374151')
+    if (collegeName) centerText(`Institution: ${collegeName}`, 512, 11, 'Times-Roman', '#374151')
 
-    const footerY1 = pageHeight * 0.90
-    const footerY2 = pageHeight * 0.93
-    centerText(`Certificate ID: ${certificateId}`, footerY1, 9, 'Times-Roman', '#374151')
-    centerText(`SHA256: ${verificationHash || 'pending'}`, pageHeight * 0.875, 8, 'Times-Roman', '#374151')
-    centerText(`Verify: ${verificationUrl || buildVerificationUrl(certificateId)}`, footerY2, 9, 'Times-Roman', '#374151')
+    doc.font('Times-Roman').fontSize(8).fillColor('#374151')
+    doc.text(`Project ID: ${projectId || 'unavailable'}`, 62, pageHeight - 72, { width: 230 })
+    doc.text(`Certificate ID: ${certificateId}`, 62, pageHeight - 56, { width: 230 })
+    doc.text(`SHA256: ${verificationHash || 'pending'}`, 310, pageHeight - 72, { width: 260 })
+    doc.text(`Verify: ${verificationUrl || buildVerificationUrl(certificateId)}`, 310, pageHeight - 56, { width: 360 })
 
     doc.end()
     stream.on('finish', resolve)
@@ -135,7 +153,7 @@ const generateValidationCertificates = async ({ project, members, milestoneSumma
     const certificateId = generateCertificateId()
     const userId = member._id || member.id || member
     const userName = member.name || 'Team Member'
-    const role = userId?.toString?.() === project.owner?.toString?.() ? 'Startup Lead' : 'Startup Team Member'
+    const role = isProjectOwner(project, userId) ? 'Startup Lead' : 'Startup Team Member'
     const contributionSummary = contributionSummaries.get?.(userId?.toString?.()) || 'Contributed to startup execution, validation preparation, and incubation readiness work.'
     const timestamp = issuedAt.toISOString()
     const startupName = project.title
@@ -149,14 +167,16 @@ const generateValidationCertificates = async ({ project, members, milestoneSumma
     const verificationUrl = buildVerificationUrl(certificateId)
     const result = await generateCertificatePdf({
       userName: member.name || 'Team Member',
+      userEmail: member.email || '',
       projectTitle: startupName,
+      projectId: project._id,
       collegeName: project.college?.name,
       issuedAt,
       certificateId,
       memberRole: role,
       contributionSummary,
       milestonesCompleted: milestoneSummary.completed || 0,
-      stageAchieved: project.lifecycleStage ? project.lifecycleStage.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()) : 'Validation',
+      stageAchieved: formatStage(project.lifecycleStage, 'Validation'),
       projectStatus: project.lifecycleStage === 'incubation_ready' ? 'Completed' : 'In Progress',
       verificationHash,
       verificationUrl
@@ -215,23 +235,23 @@ const generateProjectCertificates = async ({ project, members, milestonesComplet
   for (const member of members) {
     const userId = member._id || member.id || member
     const memberName = member.name || 'Team Member'
-    const role = userId?.toString?.() === project.owner?._id?.toString?.() || userId?.toString?.() === project.owner?.toString?.()
-      ? 'Startup Lead'
-      : 'Startup Team Member'
+    const role = isProjectOwner(project, userId) ? 'Startup Lead' : 'Startup Team Member'
     const certificateId = generateCertificateId()
     const verificationHash = createCertificateHash({ memberName, role, startupName, projectId, timestamp })
     const verificationUrl = buildVerificationUrl(certificateId)
 
     const result = await generateCertificatePdf({
       userName: memberName,
+      userEmail: member.email || '',
       projectTitle: startupName,
+      projectId,
       collegeName: project.college?.name,
       issuedAt,
       certificateId,
       memberRole: role,
       contributionSummary: 'Participated in the Collab pre-incubation startup execution process.',
       milestonesCompleted,
-      stageAchieved: project.lifecycleStage ? project.lifecycleStage.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()) : 'Startup Execution',
+      stageAchieved: formatStage(project.lifecycleStage, 'Startup Execution'),
       projectStatus,
       verificationHash,
       verificationUrl
