@@ -8,10 +8,15 @@ const {
   updateHackathon,
   approveHackathon,
   archiveHackathon,
+  restoreHackathon,
+  permanentlyDeleteHackathon,
   listHackathonRegistrations,
   createHackathonRegistration,
+  createHackathonTeam,
   getHackathonRegistrationDetails,
   updateHackathonRegistrationStatus,
+  updateHackathonTeam,
+  deleteHackathonTeam,
   createHackathonStage,
   listHackathonStages,
   updateHackathonStage,
@@ -44,10 +49,15 @@ router.get('/:id', requireRole('admin'), getHackathonDetails)
 router.patch('/:id', requireRole('admin'), updateHackathon)
 router.patch('/:id/approve', requireRole('admin'), approveHackathon)
 router.delete('/:id', requireRole('admin'), archiveHackathon)
+router.patch('/:id/restore', requireRole('admin'), restoreHackathon)
+router.delete('/:id/permanent', requireRole('admin'), permanentlyDeleteHackathon)
 router.get('/:id/registrations', requireRole('admin'), listHackathonRegistrations)
 router.post('/:id/registrations', requireRole('admin'), createHackathonRegistration)
+router.post('/:id/teams', requireRole('admin'), createHackathonTeam)
 router.get('/:id/registrations/:registrationId', requireRole('admin'), getHackathonRegistrationDetails)
 router.patch('/:id/registrations/:registrationId/status', requireRole('admin'), updateHackathonRegistrationStatus)
+router.patch('/:id/registrations/:registrationId', requireRole('admin'), updateHackathonTeam)
+router.delete('/:id/registrations/:registrationId', requireRole('admin'), deleteHackathonTeam)
 router.get('/:id/stages', requireRole('admin'), listHackathonStages)
 router.post('/:id/stages', requireRole('admin'), createHackathonStage)
 router.patch('/:id/stages/:stageId', requireRole('admin'), updateHackathonStage)

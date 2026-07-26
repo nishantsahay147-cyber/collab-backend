@@ -8,7 +8,6 @@ const Certificate = require('../models/Certificate')
 const JoinRequest = require('../models/JoinRequest')
 const Feedback = require('../models/Feedback')
 const Task = require('../models/Task')
-const Opportunity = require('../models/Opportunity')
 const FeedPost = require('../models/FeedPost')
 
 const withSession = (session) => (session ? { session } : {})
@@ -38,7 +37,6 @@ async function cleanupUser(userId, session) {
   await JoinRequest.deleteMany({ user: id }, opts)
   await Feedback.deleteMany({ user: id }, opts)
   await Task.deleteMany({ assignee: id }, opts)
-  await Opportunity.deleteMany({ createdBy: id }, opts)
   await FeedPost.deleteMany({ authorId: idString }, opts)
   await FeedPost.updateMany({}, { $pull: { likedBy: idString, dislikedBy: idString, comments: { authorId: idString } } }, opts)
   await Project.updateMany(

@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const Project = require('../models/Project')
 const Milestone = require('../models/Milestone')
+const HackathonRegistration = require('../models/HackathonRegistration')
 const User = require('../models/User')
 const { logAdminAction } = require('../services/adminActionLogger')
 const { logProjectAccess } = require('../services/projectAccessLogger')
@@ -14,6 +15,34 @@ const uploadsDir = path.join(__dirname, '..', 'uploads')
 const findProjectFile = (project, fileId) => {
   const files = [...(project.files || []), ...(project.validation?.sharedFiles || [])]
   return files.find((item) => item._id?.toString() === fileId || item.filename === fileId)
+}
+
+const WORKSPACE_FIELDS = {
+  foundation: { strings: ['tagline'], lists: ['descriptorWords'] },
+  purpose: { strings: ['founderInspiration', 'impactStatement'], lists: [] },
+  readiness: { strings: ['notes', 'fundingAvailable', 'technicalResources', 'existingAssets'], lists: [] },
+  mvp: { strings: ['roadmap'], lists: ['figmaLinks', 'githubLinks', 'demoLinks'] },
+  incubation: { strings: ['executiveSummary', 'startupOverview'], lists: ['pitchDeckLinks', 'demoVideoLinks'] }
+}
+const VALIDATION_WORKSPACE_FIELDS = {
+  strings: ['problemStatement', 'targetUsers', 'whoSpokenTo', 'repeatedProblems', 'surprisingInsights', 'useOrPaySignal', 'feedbackChanges'],
+  lists: ['coreAssumptions']
+}
+const normalizeWorkspaceText = (value, maxLength = 12000) => {
+  if (typeof value !== 'string') return null
+  return value.trim().slice(0, maxLength)
+}
+const normalizeWorkspaceList = (value) => {
+  if (!Array.isArray(value)) return null
+  return value
+    .filter((item) => typeof item === 'string')
+    .map((item) => item.trim().slice(0, 2000))
+    .filter(Boolean)
+    .slice(0, 50)
+}
+const compactAuditValue = (value) => {
+  const text = Array.isArray(value) ? value.join(', ') : String(value || '')
+  return text.length > 500 ? `${text.slice(0, 497)}...` : text
 }
 
 exports.listAdminProjects = async (req, res) => {
@@ -54,13 +83,21 @@ exports.getAdminProjectDetails = async (req, res) => {
       metadata: { source: 'admin_project_records' }
     })
 
-    const milestones = await Milestone.find({ projectId: id })
-      .select('title description owner lifecycleStage dueDate status priority blockers blockerDetails completedAt createdAt updatedAt')
-      .populate('owner', 'name email')
-      .sort({ createdAt: -1 })
-      .lean()
+    const [milestones, hackathons] = await Promise.all([
+      Milestone.find({ projectId: id })
+        .select('title description owner lifecycleStage dueDate status priority blockers blockerDetails completedAt createdAt updatedAt')
+        .populate('owner', 'name email')
+        .sort({ createdAt: -1 })
+        .lean(),
+      HackathonRegistration.find({ project: id })
+        .select('hackathon teamName registrationStatus roundStatus currentStage submittedAt')
+        .populate('hackathon', 'title phase status visibility')
+        .populate('currentStage', 'stageName order status')
+        .sort({ createdAt: -1 })
+        .lean()
+    ])
 
-    res.json({ project, milestones })
+    res.json({ project, milestones, hackathons })
   } catch (error) {
     console.error('Admin project detail error:', error)
     res.status(500).json({ message: 'Failed to load project details' })
@@ -96,6 +133,94 @@ exports.updateAdminProjectRecord = async (req, res) => {
   } catch (error) {
     console.error('Admin project update error:', error)
     res.status(500).json({ message: 'Failed to update project' })
+  }
+}
+
+exports.updateAdminProjectWorkspace = async (req, res) => {
+  try {
+    const { id } = req.params
+    if (!isObjectId(id)) return res.status(400).json({ message: 'Invalid project id' })
+    const { pipeline, validationWorkspace } = req.body || {}
+    if ((!pipeline || typeof pipeline !== 'object') && (!validationWorkspace || typeof validationWorkspace !== 'object')) {
+      return res.status(400).json({ message: 'Provide startup workspace fields to update' })
+    }
+
+    const project = await Project.findById(id)
+    if (!project) return res.status(404).json({ message: 'Project not found' })
+    const changes = []
+
+    if (pipeline && typeof pipeline === 'object') {
+      for (const [section, fields] of Object.entries(WORKSPACE_FIELDS)) {
+        const requested = pipeline[section]
+        if (!requested || typeof requested !== 'object') continue
+        const unsupported = Object.keys(requested).filter((key) => !fields.strings.includes(key) && !fields.lists.includes(key))
+        if (unsupported.length) return res.status(400).json({ message: `Unsupported ${section} fields: ${unsupported.join(', ')}` })
+        project.pipeline[section] = { ...(project.pipeline?.[section]?.toObject?.() || project.pipeline?.[section] || {}) }
+        for (const field of fields.strings) {
+          if (requested[field] === undefined) continue
+          const nextValue = normalizeWorkspaceText(requested[field])
+          if (nextValue === null) return res.status(400).json({ message: `${field} must be text` })
+          const previous = project.pipeline[section][field] || ''
+          if (previous !== nextValue) {
+            project.pipeline[section][field] = nextValue
+            changes.push({ field: `pipeline.${section}.${field}`, oldValue: compactAuditValue(previous), newValue: compactAuditValue(nextValue) })
+          }
+        }
+        for (const field of fields.lists) {
+          if (requested[field] === undefined) continue
+          const nextValue = normalizeWorkspaceList(requested[field])
+          if (nextValue === null) return res.status(400).json({ message: `${field} must be a list` })
+          const previous = project.pipeline[section][field] || []
+          if (JSON.stringify(previous) !== JSON.stringify(nextValue)) {
+            project.pipeline[section][field] = nextValue
+            changes.push({ field: `pipeline.${section}.${field}`, oldValue: compactAuditValue(previous), newValue: compactAuditValue(nextValue) })
+          }
+        }
+      }
+      project.markModified('pipeline')
+    }
+
+    if (validationWorkspace && typeof validationWorkspace === 'object') {
+      const unsupported = Object.keys(validationWorkspace).filter((key) => !VALIDATION_WORKSPACE_FIELDS.strings.includes(key) && !VALIDATION_WORKSPACE_FIELDS.lists.includes(key))
+      if (unsupported.length) return res.status(400).json({ message: `Unsupported validation fields: ${unsupported.join(', ')}` })
+      project.validation = project.validation || {}
+      project.validation.workspace = { ...(project.validation.workspace?.toObject?.() || project.validation.workspace || {}) }
+      for (const field of VALIDATION_WORKSPACE_FIELDS.strings) {
+        if (validationWorkspace[field] === undefined) continue
+        const nextValue = normalizeWorkspaceText(validationWorkspace[field])
+        if (nextValue === null) return res.status(400).json({ message: `${field} must be text` })
+        const previous = project.validation.workspace[field] || ''
+        if (previous !== nextValue) {
+          project.validation.workspace[field] = nextValue
+          changes.push({ field: `validation.workspace.${field}`, oldValue: compactAuditValue(previous), newValue: compactAuditValue(nextValue) })
+        }
+      }
+      for (const field of VALIDATION_WORKSPACE_FIELDS.lists) {
+        if (validationWorkspace[field] === undefined) continue
+        const nextValue = normalizeWorkspaceList(validationWorkspace[field])
+        if (nextValue === null) return res.status(400).json({ message: `${field} must be a list` })
+        const previous = project.validation.workspace[field] || []
+        if (JSON.stringify(previous) !== JSON.stringify(nextValue)) {
+          project.validation.workspace[field] = nextValue
+          changes.push({ field: `validation.workspace.${field}`, oldValue: compactAuditValue(previous), newValue: compactAuditValue(nextValue) })
+        }
+      }
+      project.markModified('validation')
+    }
+
+    if (!changes.length) return res.json({ project, changes: [] })
+    await project.save()
+    await logAdminAction({
+      adminUser: adminId(req),
+      action: 'update_project_workspace',
+      targetType: 'project',
+      targetId: project._id,
+      details: { changes }
+    })
+    res.json({ project, changes })
+  } catch (error) {
+    console.error('Admin workspace update error:', error)
+    res.status(500).json({ message: 'Failed to update startup workspace' })
   }
 }
 

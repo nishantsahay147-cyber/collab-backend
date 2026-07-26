@@ -5,6 +5,7 @@ const {
   listAdminProjects,
   getAdminProjectDetails,
   updateAdminProjectRecord,
+  updateAdminProjectWorkspace,
   getAdminProjectTeam,
   addAdminProjectTeamMember,
   removeAdminProjectTeamMember,
@@ -24,6 +25,7 @@ const {
 router.get('/', requireRole('admin'), listAdminProjects)
 router.get('/:id', requireRole('admin'), getAdminProjectDetails)
 router.patch('/:id', requireRole('admin'), updateAdminProjectRecord)
+router.patch('/:id/workspace', requireRole('admin'), updateAdminProjectWorkspace)
 router.get('/:id/team', requireRole('admin'), getAdminProjectTeam)
 router.post('/:id/team', requireRole('admin'), addAdminProjectTeamMember)
 router.delete('/:id/team/:userId', requireRole('admin'), removeAdminProjectTeamMember)

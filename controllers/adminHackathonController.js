@@ -7,6 +7,7 @@ const HackathonSubmission = require('../models/HackathonSubmission')
 const HackathonAnnouncement = require('../models/HackathonAnnouncement')
 const Notification = require('../models/Notification')
 const Project = require('../models/Project')
+const User = require('../models/User')
 const PDFDocument = require('pdfkit')
 const { logAdminAction } = require('../services/adminActionLogger')
 
@@ -18,11 +19,12 @@ const toArray = (value) => Array.isArray(value)
     ? value.split(',').map((item) => item.trim()).filter(Boolean)
     : []
 const pickFields = (body = {}) => {
-  const allowed = ['title', 'description', 'organizer', 'startDate', 'endDate', 'rules', 'eligibility', 'themes', 'prizes', 'status', 'visibility', 'phase']
+  const allowed = ['title', 'slug', 'description', 'organizer', 'institute', 'country', 'state', 'city', 'eventCategory', 'bannerUrl', 'logoUrl', 'theme', 'location', 'mode', 'startDate', 'endDate', 'rules', 'brochureUrl', 'brochureButtonText', 'brochureVisibility', 'eligibility', 'themes', 'prizes', 'sponsors', 'judges', 'mentors', 'faqs', 'registrationUrl', 'registrationButtonText', 'registrationOpens', 'registrationCloses', 'teamSizeMin', 'teamSizeMax', 'contactEmail', 'activeStage', 'externalEventUrl', 'completionButtonText', 'completionVisibility', 'leaderboardVisibility', 'awards', 'status', 'visibility', 'phase']
   return allowed.reduce((acc, field) => {
     if (body[field] === undefined) return acc
-    if ((field === 'startDate' || field === 'endDate') && body[field] === '') return acc
-    if (field === 'themes' || field === 'prizes') acc[field] = toArray(body[field])
+    if (['startDate', 'endDate', 'registrationOpens', 'registrationCloses'].includes(field) && body[field] === '') return acc
+    if (field === 'themes' || field === 'prizes' || field === 'sponsors') acc[field] = toArray(body[field])
+    else if (field === 'slug') acc[field] = String(body[field]).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
     else if (typeof body[field] === 'string') acc[field] = body[field].trim()
     else acc[field] = body[field]
     return acc
@@ -93,6 +95,9 @@ const buildHackathonResults = async (hackathonId) => {
   return { hackathon, stages, rankings: rows }
 }
 
+// Participant views share the exact same ranking calculation as the admin panel.
+exports.buildHackathonResults = buildHackathonResults
+
 exports.createHackathon = async (req, res) => {
   try {
     const payload = pickFields(req.body)
@@ -145,13 +150,52 @@ exports.approveHackathon = async (req, res) => {
 exports.archiveHackathon = async (req, res) => {
   try {
     if (req.body?.confirm !== 'DELETE_HACKATHON') return res.status(400).json({ message: 'Confirmation required' })
-    const hackathon = await Hackathon.findByIdAndUpdate(req.params.id, { status: 'archived', visibility: 'private' }, { new: true, runValidators: true })
+    const hackathon = await Hackathon.findByIdAndUpdate(req.params.id, { status: 'archived', visibility: 'private', archivedAt: new Date(), archivedBy: adminId(req) }, { new: true, runValidators: true })
     if (!hackathon) return res.status(404).json({ message: 'Hackathon not found' })
     await logAdminAction({ adminUser: adminId(req), action: 'archive_hackathon', targetType: 'hackathon', targetId: hackathon._id })
     res.json({ hackathon })
   } catch (error) {
     console.error('Archive hackathon error:', error)
     sendHackathonError(res, error, 'Failed to archive hackathon')
+  }
+}
+
+exports.restoreHackathon = async (req, res) => {
+  try {
+    const hackathon = await Hackathon.findByIdAndUpdate(
+      req.params.id,
+      { status: 'draft', visibility: 'private', phase: 'REGISTRATIONS_CLOSED', archivedAt: undefined, archivedBy: undefined },
+      { new: true, runValidators: true }
+    )
+    if (!hackathon) return res.status(404).json({ message: 'Hackathon not found' })
+    await logAdminAction({ adminUser: adminId(req), action: 'restore_hackathon', targetType: 'hackathon', targetId: hackathon._id })
+    res.json({ hackathon, message: 'Hackathon restored as a private draft. Publish it when ready.' })
+  } catch (error) {
+    console.error('Restore hackathon error:', error)
+    sendHackathonError(res, error, 'Failed to restore hackathon')
+  }
+}
+
+exports.permanentlyDeleteHackathon = async (req, res) => {
+  try {
+    if (req.body?.confirm !== 'DELETE_HACKATHON') return res.status(400).json({ message: 'Confirmation required' })
+    const hackathon = await Hackathon.findById(req.params.id).select('_id title')
+    if (!hackathon) return res.status(404).json({ message: 'Hackathon not found' })
+    const stages = await HackathonStage.find({ hackathon: hackathon._id }).select('_id')
+    await Promise.all([
+      HackathonRegistration.deleteMany({ hackathon: hackathon._id }),
+      JudgeReview.deleteMany({ hackathon: hackathon._id }),
+      HackathonSubmission.deleteMany({ hackathon: hackathon._id }),
+      HackathonAnnouncement.deleteMany({ hackathon: hackathon._id }),
+      JudgingCriteria.deleteMany({ stage: { $in: stages.map((stage) => stage._id) } }),
+      HackathonStage.deleteMany({ hackathon: hackathon._id }),
+      Hackathon.findByIdAndDelete(hackathon._id)
+    ])
+    await logAdminAction({ adminUser: adminId(req), action: 'permanently_delete_hackathon', targetType: 'hackathon', targetId: hackathon._id, details: { title: hackathon.title } })
+    res.json({ message: 'Hackathon and its event records were permanently deleted.' })
+  } catch (error) {
+    console.error('Permanent hackathon deletion error:', error)
+    res.status(500).json({ message: 'Failed to permanently delete hackathon' })
   }
 }
 
@@ -172,6 +216,8 @@ exports.listHackathonRegistrations = async (req, res) => {
     const registrations = await HackathonRegistration.find({ hackathon: req.params.id })
       .populate({ path: 'project', select: 'title category lifecycleStage owner teamMembers', populate: projectTeamPopulate })
       .populate('registeredUsers', 'name email role')
+      .populate('teamLead', 'name email role')
+      .populate('currentStage', 'stageName order status')
       .sort({ submittedAt: -1 })
       .lean()
     res.json({ registrations })
@@ -194,15 +240,108 @@ exports.createHackathonRegistration = async (req, res) => {
     const registeredUsers = [project.owner, ...(project.teamMembers || [])].filter(Boolean)
     const registration = await HackathonRegistration.findOneAndUpdate(
       { hackathon: hackathon._id, project: project._id },
-      { hackathon: hackathon._id, project: project._id, registeredUsers, registrationStatus: 'pending', submittedAt: new Date() },
+      { hackathon: hackathon._id, project: project._id, registeredUsers, teamLead: project.owner, registrationStatus: 'pending', submittedAt: new Date() },
       { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
-    ).populate({ path: 'project', select: 'title category lifecycleStage owner teamMembers', populate: projectTeamPopulate }).populate('registeredUsers', 'name email role')
+    ).populate({ path: 'project', select: 'title category lifecycleStage owner teamMembers', populate: projectTeamPopulate }).populate('registeredUsers', 'name email role').populate('teamLead', 'name email role')
     await logAdminAction({ adminUser: adminId(req), action: 'create_hackathon_registration', targetType: 'hackathon_registration', targetId: registration._id, details: { hackathonId: req.params.id, projectId } })
     res.status(201).json({ registration })
   } catch (error) {
     if (error?.code === 11000) return res.status(409).json({ message: 'Project is already registered' })
     console.error('Create hackathon registration error:', error)
     res.status(500).json({ message: 'Failed to register project' })
+  }
+}
+
+exports.createHackathonTeam = async (req, res) => {
+  try {
+    const hackathon = await Hackathon.findById(req.params.id)
+    if (!hackathon) return res.status(404).json({ message: 'Hackathon not found' })
+    const { projectId, teamName, projectName, leadId, memberIds = [], category = 'Business & Startup', shortPitch = '', description = '', executionPlan = '' } = req.body || {}
+    let project
+    if (projectId) {
+      project = await Project.findById(projectId).select('owner teamMembers')
+      if (!project) return res.status(404).json({ message: 'Project not found' })
+    } else {
+      if (!projectName || !leadId) return res.status(400).json({ message: 'Project name and team lead are required' })
+      const lead = await User.findById(leadId).select('_id college')
+      if (!lead) return res.status(404).json({ message: 'Team lead not found' })
+      const allowedCategories = new Set(['Tech & Product', 'Business & Startup', 'Design & Creative', 'Marketing & Content', 'Services & Operations'])
+      const uniqueMembers = [...new Set((Array.isArray(memberIds) ? memberIds : []).map(String).filter((id) => id && id !== String(leadId)))]
+      const members = await User.find({ _id: { $in: uniqueMembers } }).select('_id')
+      project = await Project.create({
+        title: String(projectName).trim(),
+        shortPitch: String(shortPitch || projectName).trim().slice(0, 200),
+        description: String(description || shortPitch || projectName).trim(),
+        category: allowedCategories.has(category) ? category : 'Business & Startup',
+        numberOfTeammates: Math.max(1, members.length),
+        visibility: 'private',
+        executionPlan: String(executionPlan || 'Created by the Builder’s League administration.').trim(),
+        owner: lead._id,
+        teamMembers: members.map((member) => member._id),
+        college: lead.college || undefined
+      })
+      await User.updateOne({ _id: lead._id }, { $inc: { projectsCreated: 1 } })
+    }
+    const registeredUsers = [project.owner, ...(project.teamMembers || [])].filter(Boolean)
+    const registration = await HackathonRegistration.findOneAndUpdate(
+      { hackathon: hackathon._id, project: project._id },
+      { hackathon: hackathon._id, project: project._id, teamName: String(teamName || '').trim(), teamLead: project.owner, registeredUsers, registrationStatus: 'approved', submittedAt: new Date() },
+      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
+    ).populate({ path: 'project', select: 'title category lifecycleStage owner teamMembers', populate: projectTeamPopulate }).populate('registeredUsers', 'name email role').populate('teamLead', 'name email role')
+    await logAdminAction({ adminUser: adminId(req), action: 'create_hackathon_team', targetType: 'hackathon_registration', targetId: registration._id, details: { hackathonId: req.params.id, projectId: project._id, teamName: registration.teamName } })
+    res.status(201).json({ registration, project })
+  } catch (error) {
+    if (error?.code === 11000) return res.status(409).json({ message: 'This project is already linked to the hackathon' })
+    console.error('Create hackathon team error:', error)
+    sendHackathonError(res, error, 'Failed to create hackathon team')
+  }
+}
+
+exports.updateHackathonTeam = async (req, res) => {
+  try {
+    const registration = await HackathonRegistration.findOne({ _id: req.params.registrationId, hackathon: req.params.id }).populate('project')
+    if (!registration || !registration.project) return res.status(404).json({ message: 'Hackathon team not found' })
+    const { teamName, teamLeadId, memberIds, roundStatus, currentStage, adminNotes, registrationStatus } = req.body || {}
+    const project = registration.project
+    if (teamLeadId !== undefined || memberIds !== undefined) {
+      const lead = await User.findById(teamLeadId || registration.teamLead || project.owner).select('_id')
+      if (!lead) return res.status(404).json({ message: 'Team lead not found' })
+      const ids = [...new Set((Array.isArray(memberIds) ? memberIds : project.teamMembers || []).map(String).filter((id) => id && id !== String(lead._id)))]
+      const members = await User.find({ _id: { $in: ids } }).select('_id')
+      project.owner = lead._id
+      project.teamMembers = members.map((member) => member._id)
+      project.numberOfTeammates = Math.max(1, members.length)
+      await project.save()
+      registration.teamLead = lead._id
+      registration.registeredUsers = [lead._id, ...members.map((member) => member._id)]
+    }
+    if (teamName !== undefined) registration.teamName = String(teamName).trim().slice(0, 180)
+    if (roundStatus !== undefined) registration.roundStatus = roundStatus
+    if (currentStage !== undefined) registration.currentStage = currentStage || undefined
+    if (adminNotes !== undefined) registration.adminNotes = String(adminNotes).trim().slice(0, 3000)
+    if (registrationStatus !== undefined) registration.registrationStatus = registrationStatus
+    await registration.save()
+    await logAdminAction({ adminUser: adminId(req), action: 'update_hackathon_team', targetType: 'hackathon_registration', targetId: registration._id, details: { hackathonId: req.params.id } })
+    res.json({ registration })
+  } catch (error) {
+    console.error('Update hackathon team error:', error)
+    sendHackathonError(res, error, 'Failed to update hackathon team')
+  }
+}
+
+exports.deleteHackathonTeam = async (req, res) => {
+  try {
+    const registration = await HackathonRegistration.findOneAndDelete({ _id: req.params.registrationId, hackathon: req.params.id })
+    if (!registration) return res.status(404).json({ message: 'Hackathon team not found' })
+    await Promise.all([
+      JudgeReview.deleteMany({ hackathon: req.params.id, registration: registration._id }),
+      HackathonSubmission.deleteMany({ hackathon: req.params.id, registration: registration._id })
+    ])
+    await logAdminAction({ adminUser: adminId(req), action: 'remove_hackathon_team', targetType: 'hackathon_registration', targetId: registration._id, details: { hackathonId: req.params.id, projectId: registration.project } })
+    res.json({ message: 'Team removed from this hackathon. Its Collab project was preserved.' })
+  } catch (error) {
+    console.error('Delete hackathon team error:', error)
+    res.status(500).json({ message: 'Failed to remove hackathon team' })
   }
 }
 
@@ -514,9 +653,12 @@ exports.updateHackathonSubmissionStatus = async (req, res) => {
 exports.createHackathonAnnouncement = async (req, res) => {
   try {
     const announcement = await HackathonAnnouncement.create({ ...req.body, hackathon: req.params.id, createdBy: adminId(req) })
-    const registrations = await HackathonRegistration.find({ hackathon: req.params.id }).select('registeredUsers')
+    const [registrations, hackathon] = await Promise.all([
+      HackathonRegistration.find({ hackathon: req.params.id, registrationStatus: 'approved' }).select('registeredUsers'),
+      Hackathon.findById(req.params.id).select('slug')
+    ])
     const recipients = [...new Set(registrations.flatMap((r) => (r.registeredUsers || []).map((u) => u.toString())))]
-    if (recipients.length) await Notification.insertMany(recipients.map((recipient) => ({ recipient, type: 'hackathon_announcement', title: announcement.title, message: announcement.message, actionUrl: `/opportunities?hackathon=${req.params.id}` })), { ordered: false })
+    if (recipients.length) await Notification.insertMany(recipients.map((recipient) => ({ recipient, type: 'hackathon_announcement', title: announcement.title, message: announcement.message, actionUrl: `/hackathons/${hackathon?.slug || req.params.id}/dashboard` })), { ordered: false })
     await logAdminAction({ adminUser: adminId(req), action: 'create_hackathon_announcement', targetType: 'hackathon_announcement', targetId: announcement._id })
     res.status(201).json({ announcement })
   } catch (error) {
